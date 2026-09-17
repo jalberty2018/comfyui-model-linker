@@ -40,6 +40,21 @@ NODE_TYPE_TO_CATEGORY_HINTS = {
     'DiffusersLoader': 'diffusers',
 }
 
+# Standard file input names also work when the model directory is empty,
+# so there are no combo options to compare against folder_paths.
+INPUT_NAME_TO_CATEGORY_HINTS = {
+    'lora_name': 'loras',
+    'ckpt_name': 'checkpoints',
+    'vae_name': 'vae',
+    'unet_name': 'diffusion_models',
+    'control_net_name': 'controlnet',
+    'clip_name': 'text_encoders',
+    'clip_name1': 'text_encoders',
+    'clip_name2': 'text_encoders',
+    'clip_name3': 'text_encoders',
+    'clip_vision': 'clip_vision',
+}
+
 
 def is_model_filename(value: Any) -> bool:
     """
@@ -102,17 +117,16 @@ def _derive_categories_from_input_types(node_class) -> Optional[List[str]]:
 
     for section in ('required', 'optional'):
         inputs = input_types.get(section) or {}
-        for _name, spec in inputs.items():
+        for name, spec in inputs.items():
             options = spec[0] if isinstance(spec, (list, tuple)) and spec else None
-            if not isinstance(options, (list, tuple)) or not options:
+            if not isinstance(options, (list, tuple)):
                 continue
             if not all(isinstance(opt, str) for opt in options):
                 continue
-            # A combo whose options are model filenames is a model field
-            if not any(is_model_filename(opt) for opt in options):
-                continue
-
-            category = _find_category_for_options(options)
+            model_options = [opt for opt in options if is_model_filename(opt)]
+            category = (_find_category_for_options(model_options) if model_options else None)
+            if not category:
+                category = INPUT_NAME_TO_CATEGORY_HINTS.get(name)
             if category and category not in categories:
                 categories.append(category)
 

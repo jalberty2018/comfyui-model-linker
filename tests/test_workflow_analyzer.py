@@ -94,6 +94,29 @@ def test_introspection_unknown_node():
     assert get_node_model_categories('NoSuchNode') is None
 
 
+def test_empty_lora_combo_retains_folder_category():
+    class EmptyLoraLoader:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {'required': {'lora_name': ([],)}}
+
+    nodes_mod.NODE_CLASS_MAPPINGS['EmptyLoraLoader'] = EmptyLoraLoader
+    refs = get_node_model_info({'id': 20, 'type': 'EmptyLoraLoader',
+                                'widgets_values': ['missing.safetensors']})
+    assert refs[0]['expected_categories'] == ['loras']
+    assert refs[0]['category'] == 'loras'
+
+
+def test_optional_none_choice_does_not_hide_model_category():
+    class OptionalLoraLoader:
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {'required': {'model_file': (['None'] + get_filename_list('loras'),)}}
+
+    nodes_mod.NODE_CLASS_MAPPINGS['OptionalLoraLoader'] = OptionalLoraLoader
+    assert get_node_model_categories('OptionalLoraLoader') == ['loras']
+
+
 def test_custom_loader_missing_model_gets_category():
     node = {'id': 7, 'type': 'FakeCustomLoader',
             'widgets_values': ['not_downloaded.safetensors', 4]}

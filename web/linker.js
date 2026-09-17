@@ -1186,6 +1186,15 @@ class LinkerManagerDialog extends ComfyDialog {
         try {
             const cats = (entry.expected_categories?.length ? entry.expected_categories : [entry.category])
                 .filter(c => c && c !== 'unknown');
+            if (!cats.length) {
+                panel.replaceChildren($el('div.ml-no-matches', {
+                    textContent: 'The model folder for this loader could not be determined. Local selection is unavailable until its model category is known.'
+                }));
+                return;
+            }
+            const folderLabel = $el('div.ml-no-matches', {
+                textContent: `Model folder: ${cats.map(c => `ComfyUI/models/${c}`).join(', ')} (including configured extra paths)`
+            });
             const params = new URLSearchParams();
             if (cats.length) params.set('category', cats.join(','));
             if (entry.original_path) params.set('current', entry.original_path);
@@ -1195,7 +1204,13 @@ class LinkerManagerDialog extends ComfyDialog {
             const files = await response.json();
             if (!Array.isArray(files)) throw new Error(files?.error || 'Unexpected response');
 
-            this.renderSwapPanel(panel, entry, files, cats.length > 0, onSelect);
+            const localFiles = files.filter(file => cats.includes(file.category));
+            this.renderSwapPanel(panel, entry, localFiles, true, onSelect);
+            panel.prepend(folderLabel);
+            const directories = [...new Set(localFiles.map(file => file.base_directory).filter(Boolean))];
+            if (directories.length) {
+                folderLabel.textContent = `Model folder${directories.length === 1 ? '' : 's'} (${cats.join(', ')}): ${directories.join(' • ')}`;
+            }
         } catch (error) {
             console.error('Model Linker: Error loading swap candidates:', error);
             panel.replaceChildren($el('div.ml-no-matches', {
@@ -1208,6 +1223,8 @@ class LinkerManagerDialog extends ComfyDialog {
     }
 
     renderSwapPanel(panel, entry, files, categoryFiltered, onSelect = file => this.applySwap(entry, file)) {
+        const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char =>
+            ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[char]));
         panel.innerHTML = `
             <input class="ml-filter-input ml-swap-search" type="text" placeholder="Search ${files.length} file${files.length !== 1 ? 's' : ''}...">
             <div class="ml-swap-results"></div>`;
@@ -1229,10 +1246,10 @@ class LinkerManagerDialog extends ComfyDialog {
             let html = '';
             shown.slice(0, MAX_SHOWN).forEach(f => {
                 const isCurrent = entry.full_path && f.path === entry.full_path;
-                const label = f.relative_path || f.filename || '';
-                const catChip = categoryFiltered ? '' : `<span class="ml-category-chip">${f.category || ''}</span>`;
+                const label = escapeHtml(f.relative_path || f.filename || '');
+                const catChip = categoryFiltered ? '' : `<span class="ml-category-chip">${escapeHtml(f.category)}</span>`;
                 html += `<div class="ml-swap-row">`;
-                html += `<span class="ml-match-filename" title="${f.path || ''}">${label}</span>${catChip}`;
+                html += `<span class="ml-match-filename" title="${escapeHtml(f.path)}">${label}</span>${catChip}`;
                 html += isCurrent
                     ? `<span class="ml-current-badge">current</span>`
                     : `<button class="ml-btn ml-btn-primary ml-btn-sm" data-swap-path="${encodeURIComponent(f.path || '')}">Select</button>`;
