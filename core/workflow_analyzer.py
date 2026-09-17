@@ -5,7 +5,10 @@ Extracts model references from workflow JSON and identifies missing models.
 """
 
 import os
+import ast
+import inspect
 import logging
+import textwrap
 from typing import List, Dict, Any, Optional
 
 # Import folder_paths lazily - it may not be available until ComfyUI is initialized
@@ -74,9 +77,8 @@ def is_model_filename(value: Any) -> bool:
     return ext in MODEL_EXTENSIONS
 
 
-# Cache of node_type -> list of derived categories (or None when nothing
-# could be derived). Populated lazily; a failed introspection is cached too
-# so misbehaving custom nodes are only probed once per session.
+# Cache successful category discovery. Unknown nodes may become available
+# later during custom-node registration, so do not cache failed discovery.
 _NODE_MODEL_CATEGORIES_CACHE: Dict[str, Optional[List[str]]] = {}
 
 
@@ -102,12 +104,63 @@ def get_node_model_categories(node_type: str) -> Optional[List[str]]:
         import nodes as comfy_nodes
         node_class = comfy_nodes.NODE_CLASS_MAPPINGS.get(node_type)
         if node_class is not None:
-            categories = _derive_categories_from_input_types(node_class)
+            try:
+                categories = _derive_categories_from_input_types(node_class)
+            except Exception as e:
+                logging.debug(f"Model Linker: INPUT_TYPES failed for {node_type}: {e}")
+            if not categories:
+                categories = _derive_categories_from_source(node_class)
     except Exception as e:
         logging.debug(f"Model Linker: could not introspect {node_type}: {e}")
 
-    _NODE_MODEL_CATEGORIES_CACHE[node_type] = categories
+    if categories:
+        _NODE_MODEL_CATEGORIES_CACHE[node_type] = categories
     return categories
+
+
+def _derive_categories_from_source(node_class) -> Optional[List[str]]:
+    """Read literal folder_paths.get_filename_list categories from INPUT_TYPES.
+
+    This works even with an empty directory or a failing INPUT_TYPES method.
+    Inspect the source without executing it or loading the model. Only trust
+    calls to the actual folder_paths module (including imported aliases).
+    """
+    if folder_paths is None:
+        return None
+    try:
+        method = inspect.unwrap(node_class.INPUT_TYPES)
+        namespace = method.__globals__
+        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+    except (AttributeError, OSError, TypeError, SyntaxError):
+        return None
+
+    categories = []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        is_folder_call = (
+            isinstance(func, ast.Attribute)
+            and func.attr == 'get_filename_list'
+            and isinstance(func.value, ast.Name)
+            and namespace.get(func.value.id) is folder_paths
+        ) or (
+            isinstance(func, ast.Name)
+            and namespace.get(func.id) is getattr(folder_paths, 'get_filename_list', None)
+        )
+        if not is_folder_call:
+            continue
+        argument = call.args[0] if call.args else next(
+            (kw.value for kw in call.keywords if kw.arg == 'folder_name'), None)
+        if not isinstance(argument, ast.Constant) or not isinstance(argument.value, str):
+            continue
+        category = argument.value
+        # ComfyUI's legacy folder aliases refer to these canonical categories.
+        category = {'unet': 'diffusion_models', 'clip': 'text_encoders'}.get(category, category)
+        if category in folder_paths.folder_names_and_paths and category not in ('custom_nodes', 'configs'):
+            if category not in categories:
+                categories.append(category)
+    return categories or None
 
 
 def _derive_categories_from_input_types(node_class) -> Optional[List[str]]:

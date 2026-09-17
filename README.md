@@ -16,6 +16,7 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 - **Downloads** — fetches missing models from HuggingFace/CivitAI (URLs from the workflow, a model database, or online search), with progress, speed display, bulk download, and cancel
 - **Manual local selection** — missing models also offer a searchable list of existing files in the node's model categories, regardless of filename similarity; the list opens automatically when no usable fuzzy match is found, alongside the download option
 - **Visible source folders** — the local picker shows the source directories and only offers files from the loader's model category (including configured extra model paths); unknown categories never fall back to unrelated folders
+- **Empty-folder detection** — when combo inspection cannot identify a custom loader's category, reads its `INPUT_TYPES` source for explicit `folder_paths.get_filename_list(...)` calls, including loaders such as Diffusion Model Loader KJ
 - **Safe updates** — resolved models are applied to the live graph in place (no canvas rebuild); you save the workflow yourself when ready
 
 ## Installation

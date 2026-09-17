@@ -94,6 +94,43 @@ def test_introspection_unknown_node():
     assert get_node_model_categories('NoSuchNode') is None
 
 
+class SourceDiffusionLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {'required': {'model_name': (fp.get_filename_list('diffusion_models'),)}}
+
+
+def test_source_detects_diffusion_folder_when_empty():
+    nodes_mod.NODE_CLASS_MAPPINGS['SourceDiffusionLoader'] = SourceDiffusionLoader
+    original = fp.get_filename_list
+    try:
+        fp.get_filename_list = lambda category: []
+        refs = get_node_model_info({'id': 21, 'type': 'SourceDiffusionLoader',
+                                   'widgets_values': ['missing.safetensors']})
+        assert refs[0]['category'] == 'diffusion_models'
+        assert refs[0]['expected_categories'] == ['diffusion_models']
+    finally:
+        fp.get_filename_list = original
+
+
+def test_source_detects_folder_when_input_types_fails():
+    nodes_mod.NODE_CLASS_MAPPINGS['FailingSourceLoader'] = SourceDiffusionLoader
+    original = fp.get_filename_list
+    def unavailable(category):
+        raise RuntimeError('Directory listing unavailable')
+    try:
+        fp.get_filename_list = unavailable
+        assert get_node_model_categories('FailingSourceLoader') == ['diffusion_models']
+    finally:
+        fp.get_filename_list = original
+
+
+def test_unknown_node_is_retried_after_registration():
+    assert get_node_model_categories('RegisteredLater') is None
+    nodes_mod.NODE_CLASS_MAPPINGS['RegisteredLater'] = SourceDiffusionLoader
+    assert get_node_model_categories('RegisteredLater') == ['diffusion_models']
+
+
 def test_empty_lora_combo_retains_folder_category():
     class EmptyLoraLoader:
         @classmethod
