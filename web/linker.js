@@ -1177,6 +1177,10 @@ class LinkerManagerDialog extends ComfyDialog {
             return;
         }
         panel.style.display = 'block';
+        await this.loadLocalFiles(panel, entry);
+    }
+
+    async loadLocalFiles(panel, entry, onSelect = file => this.applySwap(entry, file)) {
         panel.innerHTML = '<div class="ml-no-matches">Loading available files...</div>';
 
         try {
@@ -1191,14 +1195,19 @@ class LinkerManagerDialog extends ComfyDialog {
             const files = await response.json();
             if (!Array.isArray(files)) throw new Error(files?.error || 'Unexpected response');
 
-            this.renderSwapPanel(panel, entry, files, cats.length > 0);
+            this.renderSwapPanel(panel, entry, files, cats.length > 0, onSelect);
         } catch (error) {
             console.error('Model Linker: Error loading swap candidates:', error);
-            panel.innerHTML = `<div class="ml-no-matches">Error loading files: ${error.message}</div>`;
+            panel.replaceChildren($el('div.ml-no-matches', {
+                textContent: `Error loading files: ${error.message}`
+            }), $el('button.ml-btn.ml-btn-secondary.ml-btn-sm', {
+                textContent: 'Retry',
+                onclick: () => this.loadLocalFiles(panel, entry, onSelect)
+            }));
         }
     }
 
-    renderSwapPanel(panel, entry, files, categoryFiltered) {
+    renderSwapPanel(panel, entry, files, categoryFiltered, onSelect = file => this.applySwap(entry, file)) {
         panel.innerHTML = `
             <input class="ml-filter-input ml-swap-search" type="text" placeholder="Search ${files.length} file${files.length !== 1 ? 's' : ''}...">
             <div class="ml-swap-results"></div>`;
@@ -1213,7 +1222,7 @@ class LinkerManagerDialog extends ComfyDialog {
                 (f.category || '').toLowerCase().includes(query));
 
             if (shown.length === 0) {
-                results.innerHTML = '<div class="ml-no-matches">No files match</div>';
+                results.innerHTML = `<div class="ml-no-matches">${files.length ? 'No files match the search' : 'No local files available in this model category'}</div>`;
                 return;
             }
 
@@ -1238,7 +1247,7 @@ class LinkerManagerDialog extends ComfyDialog {
                 btn.addEventListener('click', () => {
                     const path = decodeURIComponent(btn.dataset.swapPath);
                     const file = files.find(f => f.path === path);
-                    if (file) this.applySwap(entry, file);
+                    if (file) onSelect(file);
                 });
             });
         };
@@ -1509,6 +1518,18 @@ class LinkerManagerDialog extends ComfyDialog {
         // Note: We need to match the exact same logic as renderMissingModel to find which buttons were rendered
         sortedMissingModels.forEach((missing, missingIndex) => {
             const allMatches = missing.matches || [];
+            const localPicker = container.querySelector(`#local-picker-${missing.node_id}-${missing.widget_index}`);
+            if (localPicker) {
+                let loaded = false;
+                const load = () => {
+                    if (loaded || !localPicker.open) return;
+                    loaded = true;
+                    this.loadLocalFiles(localPicker.querySelector('.ml-swap-panel'), missing,
+                        file => this.resolveModel(missing, file));
+                };
+                localPicker.addEventListener('toggle', load);
+                load();
+            }
             
             // Filter out matches below 70% confidence threshold
             const filteredMatches = allMatches.filter(m => m.confidence >= 70);
@@ -1668,6 +1689,10 @@ class LinkerManagerDialog extends ComfyDialog {
             html += `<div class="ml-no-matches">No local matches found</div>`;
         }
         
+        const hasUsableMatch = filteredMatches.some(match => !match.category_mismatch);
+        html += `<details id="local-picker-${missing.node_id}-${missing.widget_index}" ${hasUsableMatch ? '' : 'open'}>`;
+        html += `<summary class="ml-column-header">Choose a local file manually</summary>`;
+        html += `<div class="ml-swap-panel"></div></details>`;
         html += `</div>`; // End left column
         
         // RIGHT COLUMN: Download Option
