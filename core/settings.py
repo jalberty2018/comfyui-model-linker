@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -96,10 +97,26 @@ def public_view() -> Dict[str, Any]:
     return view
 
 
+def _host_matches(host: str, domain: str) -> bool:
+    return host == domain or host.endswith('.' + domain)
+
+
 def provider_for_url(url: str) -> Optional[str]:
-    if 'huggingface.co' in url or 'hf.co/' in url:
+    """
+    Which token a URL may receive, decided by its actual host. Download URLs
+    can come from a shared workflow, so a substring check would let
+    https://evil.example/huggingface.co/... collect the user's token.
+    """
+    try:
+        parsed = urlparse(url or '')
+    except ValueError:
+        return None
+    if parsed.scheme != 'https':
+        return None
+    host = (parsed.hostname or '').lower()
+    if _host_matches(host, 'huggingface.co') or host == 'hf.co':
         return 'huggingface'
-    if 'civitai.com' in url:
+    if _host_matches(host, 'civitai.com'):
         return 'civitai'
     return None
 

@@ -57,6 +57,20 @@ def test_auth_headers_only_for_matching_host():
     assert settings.auth_headers_for_url('https://example.com/x.safetensors') == {}
 
 
+def test_tokens_never_sent_to_lookalike_hosts():
+    settings.save_settings({'hf_token': 'hf_abcdefghijklmnop', 'civitai_key': 'civ_1234567890'})
+    for url in (
+        'https://evil.example/huggingface.co/a/b/resolve/main/x.safetensors',
+        'https://huggingface.co.evil.example/a/b/resolve/main/x.safetensors',
+        'https://evil.example/?u=civitai.com',
+        'https://notcivitai.com/api/download/models/1',
+        'http://huggingface.co/a/b/resolve/main/x.safetensors',
+    ):
+        assert settings.auth_headers_for_url(url) == {}, url
+    assert settings.auth_headers_for_url('https://cdn-lfs.huggingface.co/x')['Authorization'].endswith('mnop')
+    assert settings.auth_headers_for_url('https://hf.co/a/b/resolve/main/x')['Authorization'].endswith('mnop')
+
+
 def test_settings_file_lives_in_user_dir():
     assert settings.get_settings_path() == os.path.join(USER_DIR, 'model_linker_settings.json')
 
