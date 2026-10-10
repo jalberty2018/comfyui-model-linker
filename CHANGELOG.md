@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3
+
+### New
+- **Much faster HuggingFace downloads** — files from huggingface.co are downloaded with `huggingface_hub` (multiple connections via `hf_xet`), up to several times faster on fast connections (measured 645 MB/s vs ~100 MB/s on a datacenter link). Your saved HuggingFace token is used for gated models, and Cancel stops the download immediately. CivitAI and other URLs use the built-in downloader as before, and so does HuggingFace when `huggingface_hub` is missing or older than 1.1. Thanks @FNGarvin (#17).
+
 ## 1.2.2
 
 ### Security

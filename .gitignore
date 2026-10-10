@@ -29,3 +29,6 @@ Thumbs.db
 *.bak
 *.cache
 
+
+# comfy node publish archive
+node.zip
