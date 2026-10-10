@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.2
+
+### Security
+- API tokens are now only sent to the real HuggingFace and CivitAI hosts (https, matched by hostname). Previously a download link in a shared workflow that merely contained "huggingface.co" or "civitai.com" in its URL could receive your saved token when you clicked Download. Updating is recommended if you've saved a token.
+
+### Improved
+- The Settings button is now a labelled "⚙ Settings" button instead of a small icon.
+
 ## 1.2.1
 
 ### Security
