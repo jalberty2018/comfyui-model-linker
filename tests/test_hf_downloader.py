@@ -299,6 +299,62 @@ def test_dispatch_leaves_civitai_url_on_legacy_path():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# --- resolve_download_path: filename/subfolder/category come from workflows -
+
+def test_download_path_rejects_traversal_and_non_model_folders():
+    from core import downloader as dl
+
+    tmp = tempfile.mkdtemp(prefix='path_test_')
+    try:
+        with mock.patch.object(dl, 'get_download_directory', return_value=tmp):
+            bad = [
+                ('checkpoints', '../evil.py', ''),
+                ('checkpoints', '..\\..\\custom_nodes\\x\\__init__.py', ''),
+                ('checkpoints', 'model.safetensors', '../../custom_nodes/x'),
+                ('checkpoints', 'C:/Windows/evil.dll', ''),
+                ('checkpoints', 'C:evil.dll', ''),
+                ('checkpoints', '', ''),
+                ('checkpoints', '/', ''),
+                ('custom_nodes', '__init__.py', 'x'),
+                ('configs', 'a.yaml', ''),
+            ]
+            for category, filename, subfolder in bad:
+                try:
+                    dl.resolve_download_path(category, filename, subfolder)
+                except ValueError:
+                    continue
+                raise AssertionError(f'accepted {category!r} {filename!r} {subfolder!r}')
+
+            # Subfolders are how ComfyUI lists organised models; they stay allowed.
+            ok = dl.resolve_download_path('checkpoints', 'flux/model.safetensors', 'mine')
+            assert ok == os.path.join(os.path.abspath(tmp), 'mine', 'flux', 'model.safetensors')
+            # A leading slash is a relative path inside the folder, not the drive root.
+            assert dl.resolve_download_path('checkpoints', '/model.safetensors').startswith(os.path.abspath(tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_dispatch_refuses_traversal_before_starting_any_engine():
+    from core import downloader as dl
+
+    tmp = tempfile.mkdtemp(prefix='dispatch_test_')
+    try:
+        with mock.patch.object(dl, 'get_download_directory', return_value=tmp), \
+             mock.patch('core.hf_downloader.start_background_hf_download') as mocked_hf, \
+             mock.patch.object(dl, 'download_model') as mocked_legacy:
+            for url in ('https://huggingface.co/u/r/resolve/main/model.safetensors',
+                        'https://civitai.com/api/download/models/12345'):
+                try:
+                    dl.start_background_download(url=url, filename='../../evil.py', category='checkpoints')
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f'traversal accepted for {url}')
+        assert not mocked_hf.called and not mocked_legacy.called
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # --- _hf_worker: the anonymous-first / escalate-only-when-mandatory logic -
 #
 # Wraps hf_hub_download() itself -- the first (and only) network call
@@ -515,6 +571,20 @@ def test_progress_tqdm_works_when_update_transfer_is_never_called():
     bar.update(400)
     bar.update(600)
     assert bar.n == 1000
+
+
+def test_progress_tqdm_accepts_tqdm_postfix_setters():
+    # huggingface_hub 1.2x calls set_postfix_str() on the bar from hf_xet's
+    # progress callback; raising there froze progress for the whole download.
+    from core._hf_worker import _ProgressTqdm
+
+    bar = _ProgressTqdm(total=1000)
+    bar.update(100)
+    bar.set_postfix_str("10MB/s", refresh=False)
+    bar.set_postfix(speed=1)
+    bar.set_some_future_setter("x")
+    bar.update(100)
+    assert bar.n == 200
 
 
 def test_worker_download_uses_dual_signal_tqdm_class():

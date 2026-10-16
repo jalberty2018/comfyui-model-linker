@@ -2,7 +2,7 @@
 @author: Model Linker Team
 @title: ComfyUI Model Linker
 @nickname: Model Linker
-@version: 1.2.3
+@version: 1.2.4
 @description: Extension for relinking missing models and downloading from HuggingFace/CivitAI
 """
 
@@ -422,14 +422,18 @@ class ModelLinkerExtension:
                         headers = auth_headers_for_url(url)
                         
                         # Start background download
-                        download_id = start_background_download(
-                            url=url,
-                            filename=filename,
-                            category=category,
-                            headers=headers if headers else None,
-                            subfolder=subfolder
-                        )
-                        
+                        try:
+                            download_id = start_background_download(
+                                url=url,
+                                filename=filename,
+                                category=category,
+                                headers=headers if headers else None,
+                                subfolder=subfolder
+                            )
+                        except ValueError as e:
+                            # filename/subfolder/category tried to leave the model folder
+                            return web.json_response({'error': str(e), 'success': False}, status=400)
+
                         return web.json_response({
                             'success': True,
                             'download_id': download_id,

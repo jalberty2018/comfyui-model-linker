@@ -108,8 +108,24 @@ class _ProgressTqdm:
     def set_description(self, *args, **kwargs):
         pass
 
+    def set_postfix_str(self, *args, **kwargs):
+        pass
+
+    def set_postfix(self, *args, **kwargs):
+        pass
+
     def refresh(self, *args, **kwargs):
         pass
+
+    def __getattr__(self, name):
+        # huggingface_hub calls these from inside hf_xet's progress callback,
+        # where any AttributeError (e.g. set_postfix_str, added in 1.2x) kills
+        # every later progress report for the download -- the bar freezes at
+        # a few percent until the file finishes. Treat unknown tqdm setters as
+        # no-ops rather than chase each new one.
+        if name.startswith("set_"):
+            return lambda *args, **kwargs: None
+        raise AttributeError(name)
 
     def __enter__(self):
         return self

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.4
+
+### Security
+- Downloads can no longer write outside the model folder. The file name and subfolder for a download come from the workflow, so a shared workflow with a missing model named like `../../custom_nodes/...` could previously save the file anywhere ComfyUI can write, including into `custom_nodes` where it would run on the next start. Names containing `..`, drive letters, or the `custom_nodes`/`configs` folders are now refused. Updating is recommended.
+
+### Fixed
+- HuggingFace downloads no longer appear stuck at a few percent with recent `huggingface_hub` versions (1.2x, e.g. ComfyUI Desktop). The download kept going but the progress bar stopped updating until it finished.
+
 ## 1.2.3
 
 ### New
