@@ -1197,6 +1197,13 @@
 },
 {
 "repo_id": "Comfy-Org/Krea-2",
+"path": "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+"filename": "qwen3vl_4b_int8_convrot.safetensors",
+"size": 4858559240,
+"sha256": "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
+},
+{
+"repo_id": "Comfy-Org/Krea-2",
 "path": "vae/qwen_image_vae.safetensors",
 "filename": "qwen_image_vae.safetensors",
 "size": 253806246,
@@ -1292,6 +1299,69 @@
 "filename": "ae.safetensors",
 "size": 335304388,
 "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "diffusion_models/moss_image_base_bf16.safetensors",
+"filename": "moss_image_base_bf16.safetensors",
+"size": 10164655808,
+"sha256": "cacd158728a1fb9e57c408a922b54752ec71fceb566b3821269927964e62b41f"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "diffusion_models/moss_image_base_int8_convrot.safetensors",
+"filename": "moss_image_base_int8_convrot.safetensors",
+"size": 5413698958,
+"sha256": "f601c1e1161915fb3fea003da0c1782e374dd960fbb3978bc0e4e3fa1f2d8e6f"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "diffusion_models/moss_image_sft_bf16.safetensors",
+"filename": "moss_image_sft_bf16.safetensors",
+"size": 10164655808,
+"sha256": "f96738d8116d78b7316b57c663d8c98591ddafab7488f48e3099b7655e34ab6f"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "diffusion_models/moss_image_sft_int8_convrot.safetensors",
+"filename": "moss_image_sft_int8_convrot.safetensors",
+"size": 5413698958,
+"sha256": "b4d1475bc7eeffd7b809e82ea13a1fba1fb85c4e18365af3813722faa5c0fe4f"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "text_encoders/qwen3.5_9b_bf16.safetensors",
+"filename": "qwen3.5_9b_bf16.safetensors",
+"size": 19306312328,
+"sha256": "7e6e9f08d598f829cb940e60ac0c698e1f1c27a47daffd7e598cd78c78b4cc53"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "text_encoders/qwen3.5_9b_int8_convrot.safetensors",
+"filename": "qwen3.5_9b_int8_convrot.safetensors",
+"size": 9748121532,
+"sha256": "32e3787472f708fa5f83624acbf5ef23f7fc89c439e05065ea57cfe5a97f025a"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "text_encoders/qwen3.5_9b_w4a8_gptq.safetensors",
+"filename": "qwen3.5_9b_w4a8_gptq.safetensors",
+"size": 7343591088,
+"sha256": "4cc6a1543ad2061806da46f35f90cadb4801dcba246c44782cf42ec0feb6407c"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "vae/flux2-vae.safetensors",
+"filename": "flux2-vae.safetensors",
+"size": 336211292,
+"sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3"
+},
+{
+"repo_id": "Comfy-Org/MOSS-Image",
+"path": "vae/flux2-vae_small.safetensors",
+"filename": "flux2-vae_small.safetensors",
+"size": 249521340,
+"sha256": "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b"
 },
 {
 "repo_id": "Comfy-Org/Mage-Flow",
@@ -5837,6 +5907,34 @@
 "sha256": "2ceae39bd927ea945c20f2aad82c2244a446997d7b287186849caca434abf78d"
 },
 {
+"repo_id": "Kijai/MOSS-image_experimental",
+"path": "loras/moss_image_sft_4_steps_lora_v2_600_avg_rank_72_bf16.safetensors",
+"filename": "moss_image_sft_4_steps_lora_v2_600_avg_rank_72_bf16.safetensors",
+"size": 327078952,
+"sha256": "632ff58fba4b09893ba591c043f447240768cf9ac989e12bffa25f5d684b6616"
+},
+{
+"repo_id": "Kijai/MOSS-image_experimental",
+"path": "loras/moss_image_sft_lora_blocks_21_to_49_rank_512_bf16.safetensors",
+"filename": "moss_image_sft_lora_blocks_21_to_49_rank_512_bf16.safetensors",
+"size": 1157955936,
+"sha256": "98b89358e52e76e8c887e6c4fe416068fb40c749aa394e71fa90edda78a2a98b"
+},
+{
+"repo_id": "Kijai/MOSS-image_experimental",
+"path": "loras/moss_image_sft_lora_rank_256_bf16.safetensors",
+"filename": "moss_image_sft_lora_rank_256_bf16.safetensors",
+"size": 1137167616,
+"sha256": "ea898a7a35728707a8920bb6e323be2e86e388d927da0d589e89626d7b9a4398"
+},
+{
+"repo_id": "Kijai/MOSS-image_experimental",
+"path": "loras/moss_image_sft_lora_rank_512_bf16.safetensors",
+"filename": "moss_image_sft_lora_rank_512_bf16.safetensors",
+"size": 2270154512,
+"sha256": "2e23b63c0b6f9cd2df78ff01d09312a84e527bd00cdf8d3d9c0cf4dbd653dada"
+},
+{
 "repo_id": "Kijai/MagicTime-merged-fp16",
 "path": "magictime_spatial_lora_fp16.safetensors",
 "filename": "magictime_spatial_lora_fp16.safetensors",
@@ -5964,6 +6062,13 @@
 },
 {
 "repo_id": "Kijai/MiniMax-H3-experimental",
+"path": "loras/minimax_h3_taomate_fl2va_3step_avg_rank_19_bf16.safetensors",
+"filename": "minimax_h3_taomate_fl2va_3step_avg_rank_19_bf16.safetensors",
+"size": 176723664,
+"sha256": "e6f86322a0158dcf804b106e784a9ec1a078b1522c161143627364edc08a8bd9"
+},
+{
+"repo_id": "Kijai/MiniMax-H3-experimental",
 "path": "minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors",
 "filename": "minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors",
 "size": 22898594920,
@@ -5975,6 +6080,20 @@
 "filename": "minimax_h3_fl2va_pruned_w4a8_mixed.safetensors",
 "size": 12540858008,
 "sha256": "01aa7b92c007c599890461c325f9b7e3c96fb06c36f242f95b62f7f20e538dec"
+},
+{
+"repo_id": "Kijai/MiniMax-H3-experimental",
+"path": "minimax_h3_lightvae_lite_encoder_fp16.safetensors",
+"filename": "minimax_h3_lightvae_lite_encoder_fp16.safetensors",
+"size": 203172976,
+"sha256": "171b1111415878ca34e4fd122fdda5638cd31e522ec8693edbb7aee45290b7fd"
+},
+{
+"repo_id": "Kijai/MiniMax-H3-experimental",
+"path": "minimax_h3_lightvae_lite_vae_int8_convrot.safetensors",
+"filename": "minimax_h3_lightvae_lite_vae_int8_convrot.safetensors",
+"size": 1036943392,
+"sha256": "d9bde765b71ac35ee6531a32546c7ad2d50b89e5a812e1b0962b20add1ee6867"
 },
 {
 "repo_id": "Kijai/MiniMax-H3-experimental",
@@ -8817,6 +8936,13 @@
 "filename": "flux_shakker_labs_union_pro-fp8_e4m3fn.safetensors",
 "size": 3301998248,
 "sha256": "9535c82da8b4abb26eaf827e60cc3da401ed676ea85787f17b168a671b27e491"
+},
+{
+"repo_id": "Kijai/flux3_experimental",
+"path": "loras/flux3_klein_sd_lora_rank_256_bf16.safetensors",
+"filename": "flux3_klein_sd_lora_rank_256_bf16.safetensors",
+"size": 1351819304,
+"sha256": "398d0167102c3fbfb7520093b18eeb2612616c27beb532bb7cfe5c164a91e28d"
 },
 {
 "repo_id": "Kijai/hidream-O1-image_comfy",
