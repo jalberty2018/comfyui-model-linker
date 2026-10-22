@@ -17,7 +17,7 @@ fp = types.ModuleType('folder_paths')
 fp.get_user_directory = lambda: USER_DIR
 sys.modules['folder_paths'] = fp
 
-for var in ('HF_TOKEN', 'CIVITAI_API_TOKEN'):
+for var in ('HF_TOKEN', 'CIVITAI_TOKEN', 'CIVITAI_API_TOKEN'):
     os.environ.pop(var, None)
 
 from core import settings  # noqa: E402
@@ -55,6 +55,30 @@ def test_auth_headers_only_for_matching_host():
     assert settings.auth_headers_for_url('https://civitai.com/api/download/models/1') == \
         {'Authorization': 'Bearer civ_1234567890'}
     assert settings.auth_headers_for_url('https://example.com/x.safetensors') == {}
+
+
+def test_civitai_token_environment_priority_and_public_view():
+    settings.save_settings({'civitai_key': ''})
+    os.environ['CIVITAI_TOKEN'] = '  civ-env-primary-1234  '
+    os.environ['CIVITAI_API_TOKEN'] = 'civ-env-legacy-5678'
+    try:
+        assert settings.get_token('civitai') == 'civ-env-primary-1234'
+        view = settings.public_view()['civitai']
+        assert view == {'set': True, 'source': 'env', 'env_var': 'CIVITAI_TOKEN', 'hint': '…1234'}
+        assert 'civ-env-primary-1234' not in json.dumps(view)
+        assert settings.auth_headers_for_url('https://civitai.com/api/download/models/1') == {
+            'Authorization': 'Bearer civ-env-primary-1234'}
+        settings.save_settings({'civitai_key': 'saved-token-0000'})
+        assert settings.get_token('civitai') == 'saved-token-0000'
+        assert settings.public_view()['civitai']['source'] == 'settings'
+        settings.save_settings({'civitai_key': ''})
+        os.environ['CIVITAI_TOKEN'] = '  '
+        assert settings.get_token('civitai') == 'civ-env-legacy-5678'
+        assert settings.public_view()['civitai']['env_var'] == 'CIVITAI_API_TOKEN'
+    finally:
+        os.environ.pop('CIVITAI_TOKEN', None)
+        os.environ.pop('CIVITAI_API_TOKEN', None)
+        settings.save_settings({'civitai_key': ''})
 
 
 def test_tokens_never_sent_to_lookalike_hosts():

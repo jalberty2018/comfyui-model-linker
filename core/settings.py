@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 
 SETTINGS_FILENAME = 'model_linker_settings.json'
 
-# provider -> (settings key, environment variable fallback)
+# provider -> (settings key, environment variable fallbacks in priority order)
 PROVIDERS = {
-    'huggingface': ('hf_token', 'HF_TOKEN'),
-    'civitai': ('civitai_key', 'CIVITAI_API_TOKEN'),
+    'huggingface': ('hf_token', ('HF_TOKEN',)),
+    'civitai': ('civitai_key', ('CIVITAI_TOKEN', 'CIVITAI_API_TOKEN')),
 }
 
 _lock = threading.Lock()
@@ -71,26 +71,32 @@ def save_settings(updates: Dict[str, Any]) -> None:
         os.replace(tmp_path, path)
 
 
+def _resolve_token(provider: str, settings: Dict[str, Any]):
+    key, env_vars = PROVIDERS[provider]
+    candidates = [(settings.get(key), 'settings', env_vars[0])]
+    candidates.extend((os.environ.get(name), 'env', name) for name in env_vars)
+    for token, source, env_var in candidates:
+        if isinstance(token, str) and token.strip():
+            return token.strip(), source, env_var
+    return None, None, env_vars[0]
+
+
 def get_token(provider: str) -> Optional[str]:
     """Token for 'huggingface' or 'civitai': saved setting first, then env var."""
     if provider not in PROVIDERS:
         return None
-    key, env_var = PROVIDERS[provider]
-    token = load_settings().get(key) or os.environ.get(env_var)
-    return token.strip() if isinstance(token, str) and token.strip() else None
+    return _resolve_token(provider, load_settings())[0]
 
 
 def public_view() -> Dict[str, Any]:
     """What the UI may see: whether a token is set, where from, and a hint."""
     settings = load_settings()
     view = {}
-    for provider, (key, env_var) in PROVIDERS.items():
-        saved = settings.get(key)
-        env = os.environ.get(env_var)
-        token = saved or env
+    for provider in PROVIDERS:
+        token, source, env_var = _resolve_token(provider, settings)
         view[provider] = {
             'set': bool(token),
-            'source': 'settings' if saved else ('env' if env else None),
+            'source': source,
             'env_var': env_var,
             'hint': f'…{token[-4:]}' if token and len(token) > 8 else ('set' if token else ''),
         }
