@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 from .scanner import get_model_files
 from .workflow_analyzer import analyze_workflow_models, identify_missing_models, group_models_by_file
-from .matcher import find_matches
+from .matcher import find_matches, extract_filename
 from .workflow_updater import update_workflow_nodes
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 URL_PATTERN = re.compile(r'(https?://(?:huggingface\.co|civitai\.com)[^\s"\'<>\)\\]+)')
 
 # Model file extensions to look for
-MODEL_EXTENSIONS = ('.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.onnx')
+MODEL_EXTENSIONS = ('.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.onnx', '.gguf')
 
 
 def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -30,14 +30,16 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
     Extract model URLs from workflow JSON.
     
     Sources:
-    1. node.properties.models array - contains {name, url, directory}
+    1. node.properties.models array - contains {name, url, directory} and
+       optionally {hash, hash_type} (ComfyUI's model metadata format)
     2. Regex extraction from workflow JSON string - finds HuggingFace/CivitAI URLs
+    3. extra.model_resolver_hashes - SHA-256s embedded by ComfyUI-Model-Resolver
     
     Args:
         workflow_json: Complete workflow JSON dictionary
         
     Returns:
-        Dict mapping model filename -> {url, directory, source}
+        Dict mapping model filename -> {url, directory, source, sha256?}
     """
     url_map = {}
     
@@ -63,7 +65,10 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
                 name = model_info.get('name', '')
                 url = model_info.get('url', '')
                 directory = model_info.get('directory', '')
-                
+                sha256 = ''
+                if str(model_info.get('hash_type') or 'sha256').lower() == 'sha256':
+                    sha256 = _clean_sha256(model_info.get('hash'))
+
                 if name and name not in url_map:
                     url_map[name] = {
                         'url': url,
@@ -71,7 +76,22 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
                         'node_type': node_type,
                         'source': 'node_properties'
                     }
+                    if sha256:
+                        url_map[name]['sha256'] = sha256
     
+    # 1b. SHA-256s embedded by ComfyUI-Model-Resolver ("Embed workflow hashes")
+    resolver_hashes = (workflow_json.get('extra') or {}).get('model_resolver_hashes') or {}
+    for entry in resolver_hashes.get('models') or []:
+        if not isinstance(entry, dict):
+            continue
+        sha256 = _clean_sha256(entry.get('sha256'))
+        path = entry.get('path')
+        if not sha256 or not isinstance(path, str) or not path:
+            continue
+        name = path.replace('\\', '/').rsplit('/', 1)[-1]
+        url_map.setdefault(name, {'url': '', 'directory': '', 'source': 'model_resolver_hashes'})
+        url_map[name].setdefault('sha256', sha256)
+
     # 2. Extract URLs via regex from workflow JSON
     urls_found = URL_PATTERN.findall(workflow_str)
     
@@ -83,7 +103,7 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
             cleaned_urls.append(url)
     
     # 3. Extract model filenames via regex
-    model_pattern = re.compile(r'([\w\-\.%]+\.(?:safetensors|ckpt|pt|pth|bin|onnx))', re.IGNORECASE)
+    model_pattern = re.compile(r'([\w\-\.%]+\.(?:safetensors|ckpt|pt|pth|bin|onnx|gguf))', re.IGNORECASE)
     model_files_raw = model_pattern.findall(workflow_str)
     
     # Clean and decode filenames
@@ -138,6 +158,13 @@ def extract_workflow_urls(workflow_json: Dict[str, Any]) -> Dict[str, Dict[str, 
     return url_map
 
 
+def _clean_sha256(value: Any) -> str:
+    """Lowercase SHA-256 hex digest, or '' if value isn't one."""
+    if isinstance(value, str) and re.fullmatch(r'[0-9a-fA-F]{64}', value.strip()):
+        return value.strip().lower()
+    return ''
+
+
 def parse_huggingface_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Extract HuggingFace repo and path from URL.
@@ -157,6 +184,20 @@ def parse_huggingface_url(url: str) -> Tuple[Optional[str], Optional[str]]:
         return match.group(1), match.group(2)
     
     return None, None
+
+
+def attach_workflow_urls(models: List[Dict[str, Any]], workflow_urls: Dict[str, Dict[str, Any]]) -> None:
+    """Copy URL / directory / SHA-256 found in the workflow onto each model entry."""
+    for model in models:
+        original_path = model.get('original_path', '')
+        url_info = workflow_urls.get(original_path) or workflow_urls.get(extract_filename(original_path))
+        if not url_info:
+            continue
+        model['workflow_url'] = url_info.get('url', '')
+        model['workflow_directory'] = url_info.get('directory', '')
+        model['url_source'] = url_info.get('source', '')
+        if url_info.get('sha256'):
+            model['workflow_sha256'] = url_info['sha256']
 
 
 def analyze_and_find_matches(
@@ -215,15 +256,7 @@ def analyze_and_find_matches(
     missing_models = identify_missing_models(all_model_refs, available_models)
     
     # Enrich missing models with workflow URLs
-    for missing in missing_models:
-        original_path = missing.get('original_path', '')
-        filename = os.path.basename(original_path)
-        
-        if filename in workflow_urls:
-            url_info = workflow_urls[filename]
-            missing['workflow_url'] = url_info.get('url', '')
-            missing['workflow_directory'] = url_info.get('directory', '')
-            missing['url_source'] = url_info.get('source', '')
+    attach_workflow_urls(missing_models, workflow_urls)
     
     # Find matches for each missing model
     missing_with_matches = []
@@ -303,6 +336,8 @@ def analyze_and_find_matches(
     if include_resolved:
         # Grouped resolved references for the "All models" browse/swap view
         result['resolved_models'] = group_models_by_file(all_model_refs, exists_filter=True)
+        # Existing links let the Export tab reuse them
+        attach_workflow_urls(result['resolved_models'], workflow_urls)
 
     return result
 
@@ -338,7 +373,11 @@ def apply_resolution(
             'category': resolution.get('category'),
             'resolved_model': resolution.get('resolved_model'),
             'subgraph_id': resolution.get('subgraph_id'),  # Include subgraph_id for subgraph nodes
-            'is_top_level': resolution.get('is_top_level')  # True for top-level nodes, False for nodes in subgraph definitions
+            'is_top_level': resolution.get('is_top_level'),  # True for top-level nodes, False for nodes in subgraph definitions
+            # Filename nested in a dict/list widget (rgthree, LoraManager)
+            'nested_key': resolution.get('nested_key'),
+            'list_index': resolution.get('list_index'),
+            'text_widget_index': resolution.get('text_widget_index')
         }
         
         # If resolved_model provided, extract path if needed

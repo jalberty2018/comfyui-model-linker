@@ -44,11 +44,14 @@ def parse_civitai_url(url: str) -> Optional[Dict[str, Any]]:
 
 
 def get_civitai_download_url(version_id: int, api_key: Optional[str] = None) -> str:
-    """Get download URL for a CivitAI model version."""
-    url = f"https://civitai.com/api/download/models/{version_id}"
-    if api_key:
-        url += f"?token={api_key}"
-    return url
+    """
+    Get the public download URL for a CivitAI model version.
+
+    The API key is deliberately not embedded: URLs are shown in the UI and
+    can end up in shared workflows. The downloader sends the key as an
+    Authorization header instead. (api_key is kept for compatibility.)
+    """
+    return f"https://civitai.com/api/download/models/{version_id}"
 
 
 def clean_filename_for_search(filename: str) -> str:
@@ -290,15 +293,20 @@ def search_civitai_by_hash(
             model_id = data.get('modelId')
             version_id = data.get('id')
             files = data.get('files', [])
-            primary_file = files[0] if files else {}
-            
+            # A version can hold several files; pick the one with this hash
+            matching = [f for f in files
+                        if str((f.get('hashes') or {}).get('SHA256', '')).lower() == hash_value.lower()]
+            primary_file = (matching or files or [{}])[0]
+
             return {
                 'source': 'civitai',
                 'model_id': model_id,
                 'version_id': version_id,
                 'name': data.get('model', {}).get('name', ''),
+                'type': data.get('model', {}).get('type', ''),
                 'url': f"https://civitai.com/models/{model_id}",
-                'download_url': get_civitai_download_url(version_id, api_key),
+                'download_url': (primary_file.get('downloadUrl') if matching else None)
+                                or get_civitai_download_url(version_id, api_key),
                 'filename': primary_file.get('name', ''),
                 'size': primary_file.get('sizeKB', 0) * 1024
             }

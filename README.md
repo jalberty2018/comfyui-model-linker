@@ -7,13 +7,17 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 ## Features
 
 - **Workflow scanning** — finds model references in all nodes, including nested subgraphs
-- **Custom node support** — detects model fields of third-party loader nodes automatically by introspecting their input definitions; no hardcoded node list
-- **Fuzzy matching** — intelligent similarity scoring finds files despite renames, different separators, or capitalization; 100% matches shown first, otherwise best matches ≥70% confidence
+- **Custom node support** — detects model fields of third-party loader nodes automatically by tracing which model folder each input reads from (works even when that folder is empty); no hardcoded node list
+- **Multi-LoRA loaders** — rgthree Power Lora Loader and LoraManager LoRAs are detected, linked and swappable like any other model, with strength and on/off shown
+- **Fuzzy matching** — intelligent similarity scoring finds files despite renames, different separators, or capitalization; knows that `fp8`/`bf16`/`Q4_K_M` variants are the same model but a 4B is not an 8B; 100% matches shown first, otherwise best matches ≥70% confidence
 - **Cross-platform paths** — workflows authored on Windows match on Linux and vice versa (`\` vs `/` is handled)
 - **Folder-aware suggestions** — a file sitting in a folder the node can't load from is flagged with a "wrong folder" warning instead of silently failing at prompt time
 - **Auto-resolve** — one click links every perfect match; also available directly from ComfyUI's native Missing Models popup
 - **Browse & swap** — the All models tab lists every model in the workflow grouped by category; swap any of them for another local file without hunting through the node tree, applied to all referencing nodes at once
-- **Downloads** — fetches missing models from HuggingFace/CivitAI (URLs from the workflow, a model database, or online search), with progress, speed display, bulk download, and cancel
+- **Downloads** — fetches missing models from HuggingFace/CivitAI (URLs from the workflow, a model database, a bundled index of every Comfy-Org and Kijai file, or online search), with progress, speed display, bulk download, and cancel; HuggingFace files download over multiple connections for much higher speeds (see [HuggingFace downloads](#huggingface-downloads))
+- **Hash lookups** — when a workflow carries a model's SHA-256, it's identified on HuggingFace, CivitAI or CivArchive even if the file was renamed or deleted from CivitAI
+- **API tokens** — add a HuggingFace token and CivitAI API key in the **⚙ Settings** tab for gated and login-only models; stored on the ComfyUI server, never sent back to the browser (or set `HF_TOKEN` / `CIVITAI_API_TOKEN`)
+- **Export for sharing** — the Export tab finds a download link for every model (or lets you paste one), then adds a "Model links" note like ComfyUI's official templates, writes the links into the loader nodes so ComfyUI's own downloader can use them, and adds a Model Linker node
 - **Manual local selection** — missing models also offer a searchable list of existing files in the node's model categories, regardless of filename similarity; the list opens automatically when no usable fuzzy match is found, alongside the download option
 - **Visible source folders** — the local picker shows the source directories and only offers files from the loader's model category (including configured extra model paths); unknown categories never fall back to unrelated folders
 - **Empty-folder detection** — when combo inspection cannot identify a custom loader's category, reads its `INPUT_TYPES` source for explicit `folder_paths.get_filename_list(...)` calls, including loaders such as Diffusion Model Loader KJ
@@ -21,17 +25,34 @@ A ComfyUI extension that relinks missing models in shared workflows: it finds th
 
 ## Installation
 
-1. Clone or download this repository
-2. Place it in your ComfyUI `custom_nodes/` directory
+**ComfyUI-Manager:** search for **Model Linker** and install it, then restart ComfyUI. It's published on the [ComfyUI Registry](https://registry.comfy.org/publishers/kianxyzw/nodes/comfyui-model-linker) as `comfyui-model-linker`.
+
+**Manually:**
+1. Clone or download this repository into your ComfyUI `custom_nodes/` directory
+2. Install the requirements with ComfyUI's Python: `pip install -r requirements.txt`
 3. Restart ComfyUI
+
+The requirements are `requests`, `aiohttp`, `rapidfuzz` and `huggingface_hub`. All but `rapidfuzz` normally come with ComfyUI already. `huggingface_hub` is listed without a version, so installing never upgrades the one ComfyUI (via transformers) depends on. Without `rapidfuzz`, matching falls back to Python's `difflib`.
 
 ## Usage
 
 1. Open a workflow with missing models
-2. Open the Model Linker via the button in ComfyUI's top menu bar, the `Ctrl+Shift+L` shortcut, or the button injected into ComfyUI's Missing Models popup
+2. Open the Model Linker via the button in ComfyUI's top menu bar, the `Ctrl+Shift+L` shortcut, the button injected into ComfyUI's Missing Models popup, or the buttons on a **Model Linker** node in a shared workflow
 3. Review missing models and their suggested matches
 4. Link individual matches, use **Auto-Link** for all 100% matches, or **Download All Missing** for models with known sources
 5. Save your workflow when ready
+
+## HuggingFace downloads
+
+Files from huggingface.co are downloaded with `huggingface_hub` (multiple connections via `hf_xet` where available), which is much faster than a single stream on fast links. CivitAI and other URLs use the built-in downloader. If `huggingface_hub` is missing or older than 1.1.0 (for example with transformers 4.x), HuggingFace downloads use the built-in downloader too.
+
+Gated models need a HuggingFace token: add one in the **⚙ Settings** tab, or set `HF_TOKEN` in the environment ComfyUI runs in. A **Read**-scoped token from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) is enough. You also need to accept the model's terms on its HuggingFace page once. Downloads never use a token cached by `hf auth login`.
+
+Files are staged in a hidden folder next to the destination and moved into place when complete. `hf_xet` wrote no chunk cache to `HF_HOME` in testing, only about 60 KB of logs per run. If ComfyUI is killed mid-download, the hidden `.model_linker_tmp_*` folder in the destination can keep the partial file (up to the full model size) and is safe to delete.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -92,6 +92,49 @@ def get_download_directory(category: str) -> Optional[str]:
     return None
 
 
+# Folders ComfyUI registers that hold code or config rather than models.
+# Downloading into custom_nodes would let a shared workflow install a node.
+BLOCKED_DOWNLOAD_FOLDERS = {'custom_nodes', 'configs'}
+
+
+def resolve_download_path(category: str, filename: str, subfolder: str = "") -> str:
+    """
+    Absolute destination for a download, guaranteed to be inside the
+    category's model folder.
+
+    filename, subfolder and category come from the browser and, through it,
+    from shared workflows, so "../" segments, absolute paths and non-model
+    folders are rejected rather than joined blindly.
+
+    Raises:
+        ValueError: if the category is unknown or the path leaves its folder
+    """
+    if not isinstance(category, str) or category.lower() in BLOCKED_DOWNLOAD_FOLDERS:
+        raise ValueError(f'Not a model folder: {category}')
+    dest_dir = get_download_directory(category)
+    if not dest_dir:
+        raise ValueError(f'Could not find directory for category: {category}')
+
+    parts = []
+    for piece in (subfolder or '', filename or ''):
+        if not isinstance(piece, str):
+            raise ValueError('Invalid file name')
+        parts.extend(p for p in piece.replace('\\', '/').split('/') if p not in ('', '.'))
+    if not parts or not (filename or '').strip('/\\ '):
+        raise ValueError('Invalid file name')
+    if any(p == '..' or ':' in p or '\0' in p for p in parts):
+        raise ValueError(f'Invalid file name: {filename}')
+
+    # Lexical check rather than realpath: with '..' already rejected the join
+    # can't climb out, and users legitimately symlink subfolders of their
+    # model folders to other drives.
+    base = os.path.abspath(dest_dir)
+    dest_path = os.path.abspath(os.path.join(base, *parts))
+    if not os.path.normcase(dest_path).startswith(os.path.normcase(base).rstrip(os.sep) + os.sep):
+        raise ValueError(f'Invalid file name: {filename}')
+    return dest_path
+
+
 def generate_download_id() -> str:
     """Generate a unique download ID."""
     import uuid
@@ -290,14 +333,21 @@ def download_file(
         
     except requests.exceptions.RequestException as e:
         error_msg = str(e)
+        auth_required = None
         # Check for specific HTTP errors
         if hasattr(e, 'response') and e.response is not None:
             status_code = e.response.status_code
             if status_code in [401, 403]:
+                has_token = bool(headers and headers.get('Authorization'))
                 if 'huggingface.co' in url:
-                    error_msg = f"Unauthorized (HTTP {status_code}): HuggingFace token may be required."
+                    auth_required = 'huggingface'
+                    error_msg = (f"HuggingFace rejected the token (HTTP {status_code}) - check it in Model Linker settings, "
+                                 "and accept the model's terms on its page." if has_token else
+                                 f"HuggingFace token required (HTTP {status_code}) - add one in Model Linker settings.")
                 elif 'civitai.com' in url:
-                    error_msg = f"Unauthorized (HTTP {status_code}): CivitAI API key may be required."
+                    auth_required = 'civitai'
+                    error_msg = (f"CivitAI rejected the API key (HTTP {status_code}) - check it in Model Linker settings." if has_token else
+                                 f"CivitAI API key required (HTTP {status_code}) - add one in Model Linker settings.")
                 else:
                     error_msg = f"Unauthorized (HTTP {status_code}): Authentication required."
             elif status_code == 404:
@@ -306,6 +356,7 @@ def download_file(
         with download_lock:
             download_progress[download_id]['status'] = 'error'
             download_progress[download_id]['error'] = error_msg
+            download_progress[download_id]['auth_required'] = auth_required
         result['error'] = error_msg
         
         # CLI error log
@@ -365,22 +416,16 @@ def download_model(
     """
     if download_id is None:
         download_id = generate_download_id()
-    
-    # Get destination directory
-    dest_dir = get_download_directory(category)
-    if not dest_dir:
+
+    try:
+        dest_path = resolve_download_path(category, filename, subfolder)
+    except ValueError as e:
         return {
             'success': False,
             'download_id': download_id,
-            'error': f'Could not find directory for category: {category}'
+            'error': str(e)
         }
-    
-    # Add subfolder if specified
-    if subfolder:
-        dest_dir = os.path.join(dest_dir, subfolder)
-    
-    dest_path = os.path.join(dest_dir, filename)
-    
+
     # Check if file already exists
     if os.path.exists(dest_path):
         return {
@@ -432,16 +477,49 @@ def start_background_download(
 ) -> str:
     """
     Start a download in a background thread.
-    
+
+    HuggingFace URLs are routed to the huggingface_hub-backed engine
+    (core/hf_downloader.py); everything else (CivitAI, direct URLs) keeps
+    using the single-stream requests loop below, unchanged.
+
     Returns:
         download_id for tracking progress
+
+    Raises:
+        ValueError: if filename/subfolder/category would write outside a
+            model folder (see resolve_download_path)
     """
+    dest_path = resolve_download_path(category, filename, subfolder)
+
+    if 'huggingface.co' in url or url.startswith('hf://'):
+        from .sources.huggingface import parse_huggingface_url
+        parsed = parse_huggingface_url(url)
+        # Same "don't clobber an existing file" contract download_model
+        # enforces below; falling through to it (rather than duplicating
+        # the error-reporting here) keeps that behavior in one place.
+        if parsed and not os.path.exists(dest_path):
+            try:
+                from .hf_downloader import start_background_hf_download
+            except ImportError as e:
+                # huggingface_hub isn't a direct ComfyUI requirement;
+                # use the classic single-stream engine below without it.
+                logger.warning(f"HF engine unavailable ({e}), falling back to classic downloader")
+            else:
+                return start_background_hf_download(
+                    repo_id=parsed['repo'],
+                    filename=parsed['filename'],
+                    dest_dir=os.path.dirname(dest_path),
+                    dest_filename=os.path.basename(dest_path),
+                    revision=parsed.get('branch', 'main'),
+                    display_url=url,
+                )
+
     download_id = generate_download_id()
-    
+
     def run_download():
         download_model(url, filename, category, download_id, headers, subfolder)
-    
+
     thread = threading.Thread(target=run_download, daemon=True)
     thread.start()
-    
+
     return download_id

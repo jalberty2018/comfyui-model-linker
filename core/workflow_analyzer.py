@@ -7,9 +7,12 @@ Extracts model references from workflow JSON and identifies missing models.
 import os
 import ast
 import inspect
-import logging
 import textwrap
-from typing import List, Dict, Any, Optional
+import re
+import sys
+import logging
+import threading
+from typing import List, Dict, Any, Optional, Tuple
 
 # Import folder_paths lazily - it may not be available until ComfyUI is initialized
 try:
@@ -20,7 +23,7 @@ except ImportError:
 
 
 # Common model file extensions
-MODEL_EXTENSIONS = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft', '.onnx'}
+MODEL_EXTENSIONS = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft', '.onnx', '.gguf'}
 
 # Mapping of common node types to their expected model category
 # This is used as hints but we don't rely solely on this
@@ -59,6 +62,25 @@ INPUT_NAME_TO_CATEGORY_HINTS = {
 }
 
 
+# Keys holding a model filename inside dict widget values, e.g. rgthree's
+# Power Lora Loader stores each slot as {"on": true, "lora": "x.safetensors",
+# "strength": 1.0}
+NESTED_MODEL_KEYS = {
+    'lora': 'loras',
+    'lora_name': 'loras',
+    'ckpt_name': 'checkpoints',
+    'unet_name': 'diffusion_models',
+    'vae_name': 'vae',
+    'clip_name': 'text_encoders',
+}
+
+# LoraManager loaders keep a list of {"name": <file stem>, "strength", "active"}
+# in widgets_values[2] and mirror it as "<lora:name:strength>" text in [1]
+LORA_MANAGER_NODE_TYPES = {'LoraLoaderV2', 'Lora Loader (LoraManager)', 'Lora Stacker (LoraManager)'}
+LORA_MANAGER_LIST_INDEX = 2
+LORA_MANAGER_TEXT_INDEX = 1
+
+
 def is_model_filename(value: Any) -> bool:
     """
     Check if a value looks like a model filename.
@@ -77,45 +99,67 @@ def is_model_filename(value: Any) -> bool:
     return ext in MODEL_EXTENSIONS
 
 
-# Cache successful category discovery. Unknown nodes may become available
-# later during custom-node registration, so do not cache failed discovery.
-_NODE_MODEL_CATEGORIES_CACHE: Dict[str, Optional[List[str]]] = {}
+# Cache successful discovery; retry unknown nodes after registration.
+#   {'all': [categories], 'by_widget_index': {idx: [categories]},
+#    'widget_count': number of widgets the node's inputs produce}
+_NODE_MODEL_CATEGORIES_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+# Marker filenames handed out while tracing INPUT_TYPES(); they end in a
+# model extension so filters like `if f.endswith('.safetensors')` keep them
+_SENTINEL_PREFIX = '__model_linker_category__'
+_SENTINEL_PATTERN = re.compile(re.escape(_SENTINEL_PREFIX) + r'(\d+)__\.safetensors')
+_WIDGET_INPUT_TYPES = {'INT', 'FLOAT', 'STRING', 'BOOLEAN', 'COMBO'}
+# The frontend adds a control_after_generate widget after these inputs
+_SEED_INPUT_NAMES = {'seed', 'noise_seed'}
+_trace_lock = threading.RLock()
 
 
-def get_node_model_categories(node_type: str) -> Optional[List[str]]:
+def get_node_model_field_info(node_type: str) -> Optional[Dict[str, Any]]:
     """
-    Derive the model folder categories a node type loads from by
-    introspecting its INPUT_TYPES() combo option lists.
+    Work out which inputs of a node type are model fields and which folder
+    category each one loads from (issue #5).
 
-    Custom loader nodes (Nunchaku, Hy3D, IPAdapter, ...) populate their file
-    combos from folder_paths.get_filename_list() at INPUT_TYPES() time, so
-    matching an input's option list back to a category's file list tells us
-    both that the input is a model field and which folder it loads from —
-    without hardcoding every node type (issue #5).
-
-    Returns:
-        List of category names, or None if nothing could be derived.
+    Custom loader nodes (Nunchaku, Hy3D, IPAdapter, GGUF, ...) build their
+    file combos by calling folder_paths.get_filename_list() inside
+    INPUT_TYPES(). We call INPUT_TYPES() with that function swapped for a
+    tracer returning one marker filename per call; wherever a marker shows
+    up in a combo, that combo loads from the traced category. This works
+    even when the folder is empty or the node merges/filters lists. Combos
+    filled some other way fall back to matching options against folders.
     """
     if node_type in _NODE_MODEL_CATEGORIES_CACHE:
         return _NODE_MODEL_CATEGORIES_CACHE[node_type]
 
-    categories = None
+    info = None
     try:
         import nodes as comfy_nodes
         node_class = comfy_nodes.NODE_CLASS_MAPPINGS.get(node_type)
         if node_class is not None:
             try:
-                categories = _derive_categories_from_input_types(node_class)
+                info = _derive_model_fields(node_class)
             except Exception as e:
                 logging.debug(f"Model Linker: INPUT_TYPES failed for {node_type}: {e}")
-            if not categories:
+            if not info:
                 categories = _derive_categories_from_source(node_class)
+                if categories:
+                    info = {'all': categories, 'by_widget_index': {}, 'widget_count': 0}
     except Exception as e:
         logging.debug(f"Model Linker: could not introspect {node_type}: {e}")
 
-    if categories:
-        _NODE_MODEL_CATEGORIES_CACHE[node_type] = categories
-    return categories
+    if info:
+        _NODE_MODEL_CATEGORIES_CACHE[node_type] = info
+    return info
+
+
+def get_node_model_categories(node_type: str) -> Optional[List[str]]:
+    """
+    All model folder categories a node type loads from.
+
+    Returns:
+        List of category names, or None if nothing could be derived.
+    """
+    info = get_node_model_field_info(node_type)
+    return info['all'] if info else None
 
 
 def _derive_categories_from_source(node_class) -> Optional[List[str]]:
@@ -163,27 +207,146 @@ def _derive_categories_from_source(node_class) -> Optional[List[str]]:
     return categories or None
 
 
-def _derive_categories_from_input_types(node_class) -> Optional[List[str]]:
-    """Inspect a node class's INPUT_TYPES for combos of model filenames."""
-    input_types = node_class.INPUT_TYPES()
-    categories = []
+def _trace_input_types(node_class) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """
+    Call node_class.INPUT_TYPES() with folder_paths.get_filename_list traced.
+
+    Returns (input_types, {marker filename: category}). Only calls from this
+    thread are traced; other threads (e.g. a prompt being validated) still
+    get real file lists while the patch is in place.
+    """
+    global folder_paths
+    if folder_paths is None:
+        try:
+            import folder_paths as fp
+            folder_paths = fp
+        except ImportError:
+            return node_class.INPUT_TYPES(), {}
+
+    original = folder_paths.get_filename_list
+    tracer_thread = threading.get_ident()
+    markers: Dict[str, str] = {}
+
+    def traced_get_filename_list(folder_name, *args, **kwargs):
+        if threading.get_ident() != tracer_thread:
+            return original(folder_name, *args, **kwargs)
+        category = folder_name
+        map_legacy = getattr(folder_paths, 'map_legacy', None)
+        if callable(map_legacy):
+            category = map_legacy(folder_name)
+        marker = f"{_SENTINEL_PREFIX}{len(markers)}__.safetensors"
+        markers[marker] = category
+        return [marker]
+
+    # Nodes that did `from folder_paths import get_filename_list` hold their
+    # own reference, so also patch it in the globals of the defining code
+    namespaces = []
+    for attr in ('INPUT_TYPES', 'define_schema'):
+        func = getattr(getattr(node_class, attr, None), '__func__', None)
+        func_globals = getattr(func, '__globals__', None)
+        if isinstance(func_globals, dict):
+            namespaces.append(func_globals)
+    module = sys.modules.get(getattr(node_class, '__module__', ''))
+    if module is not None:
+        namespaces.append(module.__dict__)
+
+    with _trace_lock:
+        patched = []
+        folder_paths.get_filename_list = traced_get_filename_list
+        try:
+            for namespace in namespaces:
+                for name, value in list(namespace.items()):
+                    if value is original:
+                        namespace[name] = traced_get_filename_list
+                        patched.append((namespace, name))
+            input_types = node_class.INPUT_TYPES()
+        finally:
+            folder_paths.get_filename_list = original
+            for namespace, name in patched:
+                namespace[name] = original
+
+    return input_types, markers
+
+
+def _combo_options(spec) -> Optional[list]:
+    """Option list of a combo input spec, in either the list or COMBO form."""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return None
+    if isinstance(spec[0], (list, tuple)):
+        return list(spec[0])
+    if spec[0] == 'COMBO' and len(spec) > 1 and isinstance(spec[1], dict):
+        options = spec[1].get('options')
+        if isinstance(options, (list, tuple)):
+            return list(options)
+    return None
+
+
+def _derive_model_fields(node_class) -> Optional[Dict[str, Any]]:
+    """Map a node class's widget indices to the model categories they load."""
+    input_types, markers = _trace_input_types(node_class)
+
+    all_categories: List[str] = []
+    by_widget_index: Dict[int, List[str]] = {}
+    widget_index = 0
 
     for section in ('required', 'optional'):
         inputs = input_types.get(section) or {}
         for name, spec in inputs.items():
-            options = spec[0] if isinstance(spec, (list, tuple)) and spec else None
-            if not isinstance(options, (list, tuple)):
+            if not isinstance(spec, (list, tuple)) or not spec:
                 continue
-            if not all(isinstance(opt, str) for opt in options):
-                continue
-            model_options = [opt for opt in options if is_model_filename(opt)]
-            category = (_find_category_for_options(model_options) if model_options else None)
-            if not category:
-                category = INPUT_NAME_TO_CATEGORY_HINTS.get(name)
-            if category and category not in categories:
-                categories.append(category)
+            extra = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            options = _combo_options(spec)
+            is_widget = options is not None or (
+                isinstance(spec[0], str) and spec[0] in _WIDGET_INPUT_TYPES)
+            if not is_widget or extra.get('forceInput'):
+                continue  # a link input - doesn't occupy a widget slot
 
-    return categories or None
+            categories = _categories_for_options(options, markers) if options else []
+            if not categories and options is not None:
+                hint = INPUT_NAME_TO_CATEGORY_HINTS.get(name)
+                if hint:
+                    categories = [hint]
+            if categories:
+                by_widget_index[widget_index] = categories
+                for category in categories:
+                    if category not in all_categories:
+                        all_categories.append(category)
+
+            widget_index += 1
+            if extra.get('control_after_generate') or (
+                    spec[0] == 'INT' and name in _SEED_INPUT_NAMES):
+                widget_index += 1
+
+    if not all_categories:
+        return None
+    return {
+        'all': all_categories,
+        'by_widget_index': by_widget_index,
+        'widget_count': widget_index,
+    }
+
+
+def _categories_for_options(options: list, markers: Dict[str, str]) -> List[str]:
+    """Categories a combo loads from: traced markers first, else folder matching."""
+    categories = []
+    for option in options:
+        if isinstance(option, str):
+            for match in _SENTINEL_PATTERN.finditer(option):
+                category = markers.get(match.group(0))
+                if category and category not in categories:
+                    categories.append(category)
+    if categories:
+        return categories
+
+    # Combo filled without get_filename_list (os.listdir, cached lists, ...):
+    # match its real option list back to a folder
+    real_options = [opt for opt in options if isinstance(opt, str)]
+    if real_options and len(real_options) == len(options) and any(
+            is_model_filename(opt) for opt in real_options):
+        category = _find_category_for_options([opt for opt in real_options if is_model_filename(opt)])
+        if category:
+            return [category]
+    return []
 
 
 def _find_category_for_options(options) -> Optional[str]:
@@ -298,42 +461,147 @@ def get_node_model_info(node: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Get category hints for this node type: hardcoded table first, then
     # INPUT_TYPES introspection for custom loader nodes (issue #5)
     category_hint = NODE_TYPE_TO_CATEGORY_HINTS.get(node_type)
+    field_info = None
     if category_hint:
-        expected_categories = [category_hint]
+        node_categories = [category_hint]
     else:
-        expected_categories = get_node_model_categories(node_type)
-    categories_to_try = expected_categories  # None -> try all categories
+        field_info = get_node_model_field_info(node_type)
+        node_categories = field_info['all'] if field_info else None
+
+    # Per-widget categories only line up when the saved values match the
+    # widgets we counted; otherwise use the node-wide list
+    by_widget_index = None
+    if field_info and len(widgets_values) == field_info['widget_count']:
+        by_widget_index = field_info['by_widget_index']
+
+    if node_type in LORA_MANAGER_NODE_TYPES:
+        model_refs.extend(_lora_manager_refs(node_id, node_type, widgets_values))
 
     # For each widget value, check if it looks like a model file
     for idx, value in enumerate(widgets_values):
+        if isinstance(value, dict):
+            # rgthree Power Lora Loader & co. keep the filename inside a dict
+            for key, category in NESTED_MODEL_KEYS.items():
+                nested_value = value.get(key)
+                if not is_model_filename(nested_value):
+                    continue
+                ref = _build_model_ref(node_id, node_type, idx, nested_value, [category])
+                ref['nested_key'] = key
+                if 'strength' in value:
+                    ref['strength'] = value.get('strength')
+                if 'on' in value:
+                    ref['active'] = bool(value.get('on'))
+                model_refs.append(ref)
+            continue
+
         if not is_model_filename(value):
             continue
 
-        # Try to resolve the model path
-        resolved = try_resolve_model_path(value, categories_to_try)
-
-        if resolved:
-            category, full_path = resolved
-            exists = os.path.exists(full_path)
-        else:
-            # If we can't resolve it, check if it at least looks like a model filename
-            # This might be a missing model or a custom node's model
-            category = (expected_categories[0] if expected_categories else None) or 'unknown'
-            full_path = None
-            exists = False
-
-        model_refs.append({
-            'node_id': node_id,
-            'node_type': node_type,
-            'widget_index': idx,
-            'original_path': value,
-            'category': category,
-            'expected_categories': expected_categories,
-            'full_path': full_path,
-            'exists': exists
-        })
+        expected_categories = node_categories
+        if by_widget_index and idx in by_widget_index:
+            expected_categories = by_widget_index[idx]
+        model_refs.append(_build_model_ref(node_id, node_type, idx, value, expected_categories))
 
     return model_refs
+
+
+def _get_folder_paths():
+    """folder_paths, imported on first use (it may not exist at import time)."""
+    global folder_paths
+    if folder_paths is None:
+        try:
+            import folder_paths as fp
+            folder_paths = fp
+        except ImportError:
+            return None
+    return folder_paths
+
+
+def _build_model_ref(node_id, node_type, widget_index: int, value: str,
+                     expected_categories: Optional[List[str]]) -> Dict[str, Any]:
+    """Resolve one model filename found in a node and describe it."""
+    resolved = try_resolve_model_path(value, expected_categories)  # None -> try all categories
+
+    if resolved:
+        category, full_path = resolved
+        exists = os.path.exists(full_path)
+    else:
+        # Unresolvable - a missing model (or a custom node's model)
+        category = (expected_categories[0] if expected_categories else None) or 'unknown'
+        full_path = None
+        exists = False
+
+    return {
+        'node_id': node_id,
+        'node_type': node_type,
+        'widget_index': widget_index,
+        'original_path': value,
+        'category': category,
+        'expected_categories': expected_categories,
+        'full_path': full_path,
+        'exists': exists
+    }
+
+
+def _lora_manager_refs(node_id, node_type, widgets_values: list) -> List[Dict[str, Any]]:
+    """
+    Model refs for a LoraManager loader. Its entries store the file stem
+    without extension or folder ({"name": "my_lora", ...}), so match the
+    stem against the loras folder.
+    """
+    if len(widgets_values) <= LORA_MANAGER_LIST_INDEX:
+        return []
+    entries = widgets_values[LORA_MANAGER_LIST_INDEX]
+    if not isinstance(entries, list):
+        return []
+
+    lora_files = []
+    fp = _get_folder_paths()
+    if fp is not None:
+        try:
+            lora_files = fp.get_filename_list('loras')
+        except Exception:
+            lora_files = []
+    by_stem: Dict[str, str] = {}
+    for filename in lora_files:
+        stem = os.path.splitext(filename.replace('\\', '/').rsplit('/', 1)[-1])[0]
+        by_stem.setdefault(stem, filename)
+        by_stem.setdefault(stem.lower(), filename)
+
+    refs = []
+    for list_index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get('name')
+        if not isinstance(name, str) or not name.strip():
+            continue
+        filename = by_stem.get(name) or by_stem.get(name.lower())
+        if filename:
+            ref = _build_model_ref(node_id, node_type, LORA_MANAGER_LIST_INDEX, filename, ['loras'])
+        else:
+            missing_name = name if is_model_filename(name) else f'{name}.safetensors'
+            ref = _build_model_ref(node_id, node_type, LORA_MANAGER_LIST_INDEX, missing_name, ['loras'])
+        ref.update({
+            'list_index': list_index,
+            'nested_key': 'name',
+            'text_widget_index': LORA_MANAGER_TEXT_INDEX,
+            'strength': entry.get('strength'),
+            'active': bool(entry.get('active', True)),
+        })
+        refs.append(ref)
+    return refs
+
+
+def make_ref_key(ref: Dict[str, Any]) -> str:
+    """Unique id of one model slot: several LoRAs can share a node and widget."""
+    parts = [str(ref.get('node_id')), str(ref.get('widget_index'))]
+    if ref.get('list_index') is not None:
+        parts.append(str(ref['list_index']))
+    if ref.get('nested_key'):
+        parts.append(str(ref['nested_key']))
+    if ref.get('is_top_level') is False and ref.get('subgraph_id'):
+        parts.insert(0, str(ref['subgraph_id']))
+    return '-'.join(parts)
 
 
 def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -376,6 +644,7 @@ def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any
                 ref['subgraph_name'] = subgraph_name
                 ref['subgraph_path'] = None  # Top-level, not in definitions.subgraphs
                 ref['is_top_level'] = True  # Flag to indicate this is a top-level node
+                ref['ref_key'] = make_ref_key(ref)
             all_model_refs.extend(model_refs)
         except Exception as e:
             logging.warning(f"Error analyzing node {node.get('id', 'unknown')}: {e}")
@@ -401,6 +670,7 @@ def analyze_workflow_models(workflow_json: Dict[str, Any]) -> List[Dict[str, Any
                     ref['subgraph_name'] = subgraph_name
                     ref['subgraph_path'] = ['definitions', 'subgraphs', subgraph_id, 'nodes']
                     ref['is_top_level'] = False  # This is inside a subgraph definition
+                    ref['ref_key'] = make_ref_key(ref)
                 all_model_refs.extend(model_refs)
             except Exception as e:
                 logging.warning(f"Error analyzing subgraph node {node.get('id', 'unknown')}: {e}")

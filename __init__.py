@@ -2,7 +2,7 @@
 @author: Model Linker Team
 @title: ComfyUI Model Linker
 @nickname: Model Linker
-@version: 1.1.0
+@version: 1.2.4
 @description: Extension for relinking missing models and downloading from HuggingFace/CivitAI
 """
 
@@ -11,11 +11,31 @@ import logging
 # Web directory for JavaScript interface
 WEB_DIRECTORY = "./web"
 
-# Empty NODE_CLASS_MAPPINGS - we don't provide custom nodes, only web extension
-# This prevents ComfyUI from showing "IMPORT FAILED" message
-NODE_CLASS_MAPPINGS = {}
+class ModelLinkerNode:
+    """
+    Model Linker node, added to a workflow by the Export tab. It has buttons
+    to open Model Linker (added by web/linker.js) and identifies this pack
+    to ComfyUI-Manager for whoever opens the shared workflow. It has no
+    inputs or outputs, so it never runs as part of a prompt.
+    """
 
-__all__ = ["WEB_DIRECTORY"]
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "noop"
+    CATEGORY = "utils"
+    DESCRIPTION = "Opens Model Linker. Added by Model Linker's Export so others can find and download this workflow's models."
+
+    def noop(self):
+        return ()
+
+
+NODE_CLASS_MAPPINGS = {"ModelLinker": ModelLinkerNode}
+NODE_DISPLAY_NAME_MAPPINGS = {"ModelLinker": "Model Linker"}
+
+__all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
 
 class ModelLinkerExtension:
@@ -62,8 +82,14 @@ class ModelLinkerExtension:
                 self.logger.error(f"Model Linker: Could not import core modules: {e}")
                 return False
             
+            from .core.settings import (
+                public_view, save_settings, check_token, get_token, auth_headers_for_url
+            )
+
             # Import download modules
             try:
+                from .core.source_chain import find_download_source, find_by_hash
+                from .core.sources import hf_index
                 from .core.downloader import (
                     start_background_download, get_progress, get_all_progress,
                     cancel_download, get_download_directory
@@ -77,6 +103,24 @@ class ModelLinkerExtension:
                 self.logger.warning(f"Model Linker: Download features not available: {e}")
                 download_available = False
             
+            import asyncio
+
+            def attach_download_sources(missing_models):
+                """Attach a download_source to each missing model without a 100% local match."""
+                for missing in missing_models:
+                    matches = missing.get('matches', [])
+                    if any(m.get('confidence', 0) == 100 for m in matches):
+                        continue
+                    source = find_download_source(
+                        missing.get('original_path', ''),
+                        category=missing.get('category', ''),
+                        workflow_url=missing.get('workflow_url', ''),
+                        workflow_directory=missing.get('workflow_directory', ''),
+                        sha256=missing.get('workflow_sha256', ''),
+                    )
+                    if source:
+                        missing['download_source'] = source
+
             # ==================== ANALYZE ROUTES ====================
             
             @routes.post("/model_linker/analyze")
@@ -92,107 +136,16 @@ class ModelLinkerExtension:
                             status=400
                         )
                     
-                    # Analyze and find matches
+                    # Analyze and find matches, then look up download sources
+                    # for models without a 100% local match. Both block on
+                    # disk/network, so keep them off the event loop.
                     include_resolved = bool(data.get('include_resolved', False))
-                    result = analyze_and_find_matches(workflow_json, include_resolved=include_resolved)
-                    
-                    # If download available, auto-search for download sources when no 100% local match
+                    result = await asyncio.to_thread(
+                        analyze_and_find_matches, workflow_json, include_resolved=include_resolved)
+
                     if download_available:
-                        for missing in result.get('missing_models', []):
-                            # Check if there's a 100% local match
-                            matches = missing.get('matches', [])
-                            has_perfect_match = any(m.get('confidence', 0) == 100 for m in matches)
-                            
-                            if not has_perfect_match:
-                                filename = missing.get('original_path', '').split('/')[-1].split('\\')[-1]
-                                
-                                # 0. Check workflow URL first (highest priority - directly from workflow)
-                                workflow_url = missing.get('workflow_url', '')
-                                if workflow_url:
-                                    # Determine source from URL
-                                    if 'huggingface.co' in workflow_url:
-                                        source = 'huggingface'
-                                    elif 'civitai.com' in workflow_url:
-                                        source = 'civitai'
-                                    else:
-                                        source = 'workflow'
-                                    
-                                    # Try to get file size with HEAD request (non-blocking, timeout quickly)
-                                    file_size = None
-                                    try:
-                                        import requests
-                                        head_response = requests.head(workflow_url, allow_redirects=True, timeout=5)
-                                        if head_response.status_code == 200:
-                                            file_size = int(head_response.headers.get('content-length', 0))
-                                    except Exception:
-                                        pass  # Size unknown is fine
-                                    
-                                    missing['download_source'] = {
-                                        'source': source,
-                                        'url': workflow_url,
-                                        'filename': filename,
-                                        'directory': missing.get('workflow_directory', '') or missing.get('category', 'checkpoints'),
-                                        'match_type': 'exact',
-                                        'url_source': 'workflow',
-                                        'size': file_size
-                                    }
-                                    continue
-                                
-                                # 1. Check popular models (always exact match)
-                                popular_info = get_popular_model_url(filename)
-                                if popular_info:
-                                    missing['download_source'] = {
-                                        'source': 'popular',
-                                        'url': popular_info.get('url'),
-                                        'filename': filename,
-                                        'type': popular_info.get('type'),
-                                        'directory': popular_info.get('directory'),
-                                        'match_type': 'exact'
-                                    }
-                                    continue
-                                
-                                # 2. Check model list (ComfyUI Manager database)
-                                # Use exact_only=True to avoid confusing fuzzy matches for downloads
-                                model_list_result = search_model_list(filename, exact_only=True)
-                                if model_list_result:
-                                    missing['download_source'] = {
-                                        'source': 'model_list',
-                                        'url': model_list_result.get('url'),
-                                        'filename': model_list_result.get('filename'),
-                                        'name': model_list_result.get('name'),
-                                        'type': model_list_result.get('type'),
-                                        'directory': model_list_result.get('directory'),
-                                        'size': model_list_result.get('size'),
-                                        'match_type': model_list_result.get('match_type'),
-                                        'confidence': model_list_result.get('confidence')
-                                    }
-                                    continue
-                                
-                                # 3. Search HuggingFace (exact_only=True for downloads)
-                                hf_result = search_huggingface_for_file(filename, exact_only=True)
-                                if hf_result:
-                                    missing['download_source'] = {
-                                        'source': 'huggingface',
-                                        'url': hf_result.get('url'),
-                                        'filename': hf_result.get('filename'),
-                                        'name': hf_result.get('repo_id', ''),
-                                        'size': hf_result.get('size', ''),
-                                        'match_type': hf_result.get('match_type', 'exact')
-                                    }
-                                    continue
-                                
-                                # 4. Search CivitAI (exact_only=True for downloads)
-                                civitai_result = search_civitai_for_file(filename, exact_only=True)
-                                if civitai_result:
-                                    missing['download_source'] = {
-                                        'source': 'civitai',
-                                        'url': civitai_result.get('download_url'),  # CivitAI uses download_url
-                                        'filename': civitai_result.get('filename'),
-                                        'name': civitai_result.get('name', ''),
-                                        'size': civitai_result.get('size', ''),
-                                        'match_type': civitai_result.get('match_type', 'exact')
-                                    }
-                    
+                        await asyncio.to_thread(attach_download_sources, result.get('missing_models', []))
+
                     return web.json_response(result)
                 except Exception as e:
                     self.logger.error(f"Model Linker analyze error: {e}", exc_info=True)
@@ -267,6 +220,93 @@ class ModelLinkerExtension:
                         status=500
                     )
             
+            # ==================== SETTINGS ROUTES ====================
+
+            @routes.get("/model_linker/settings")
+            async def get_settings_route(request):
+                """Token status for the settings panel - never the tokens themselves."""
+                return web.json_response(public_view())
+
+            @routes.post("/model_linker/settings")
+            async def save_settings_route(request):
+                """Save or clear tokens: {hf_token?, civitai_key?}; '' clears."""
+                try:
+                    data = await request.json()
+                    updates = {}
+                    for key in ('hf_token', 'civitai_key'):
+                        if key in data:
+                            value = data.get(key)
+                            if value is not None and not isinstance(value, str):
+                                return web.json_response({'error': f'{key} must be a string'}, status=400)
+                            updates[key] = (value or '').strip()
+                    save_settings(updates)
+                    return web.json_response(public_view())
+                except Exception as e:
+                    self.logger.error(f"Model Linker settings error: {e}", exc_info=True)
+                    return web.json_response({'error': str(e)}, status=500)
+
+            @routes.post("/model_linker/settings/check/{provider}")
+            async def check_settings_route(request):
+                """Validate a stored token against the provider's API."""
+                import asyncio
+                provider = request.match_info['provider']
+                result = await asyncio.to_thread(check_token, provider)
+                return web.json_response(result)
+
+            # ==================== EXPORT ROUTES ====================
+
+            if download_available:
+                from .core import exporter
+
+                @routes.post("/model_linker/export/lookup")
+                async def export_lookup(request):
+                    """Public download link for each model: {models: [{filename, category, existing_url?, sha256?}]}."""
+                    try:
+                        data = await request.json()
+                        models = data.get('models')
+                        if not isinstance(models, list):
+                            return web.json_response({'error': 'models list is required'}, status=400)
+                        links = await asyncio.to_thread(exporter.lookup_links, models, find_download_source)
+                        return web.json_response({'links': links})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export lookup error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
+
+                @routes.post("/model_linker/export/hash")
+                async def export_hash(request):
+                    """Hash a local model file and look it up: {full_path}."""
+                    try:
+                        data = await request.json()
+                        path = data.get('full_path', '')
+                        if not isinstance(path, str) or not exporter.is_inside_model_dirs(path):
+                            return web.json_response({'error': 'Not a file in a model folder'}, status=400)
+                        job_id = exporter.start_hash_job(path, find_by_hash)
+                        return web.json_response({'job_id': job_id})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export hash error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
+
+                @routes.get("/model_linker/export/hash/{job_id}")
+                async def export_hash_status(request):
+                    job = exporter.get_hash_job(request.match_info['job_id'])
+                    if not job:
+                        return web.json_response({'error': 'Unknown job'}, status=404)
+                    return web.json_response(job)
+
+                @routes.post("/model_linker/export/markdown")
+                async def export_markdown(request):
+                    """Model links note text: {models: [{name, url, directory}]}."""
+                    try:
+                        data = await request.json()
+                        models = data.get('models')
+                        if not isinstance(models, list):
+                            return web.json_response({'error': 'models list is required'}, status=400)
+                        models = [m for m in models if isinstance(m, dict)]
+                        return web.json_response({'markdown': exporter.build_model_links_markdown(models)})
+                    except Exception as e:
+                        self.logger.error(f"Model Linker export markdown error: {e}", exc_info=True)
+                        return web.json_response({'error': str(e)}, status=500)
+
             # ==================== DOWNLOAD ROUTES ====================
             
             if download_available:
@@ -310,16 +350,30 @@ class ModelLinkerExtension:
                                 results['model_list'] = model_list_result
                                 results['found'] = True
                         
-                        # 3. Search HuggingFace for exact file match
+                        # 3. Bundled Comfy-Org/Kijai index, then hash lookups
                         if not results['found']:
-                            hf_result = search_huggingface_for_file(filename)
+                            index_result = hf_index.lookup_by_filename(filename)
+                            if index_result:
+                                results['huggingface'] = {**index_result, 'repo_id': index_result['repo_id']}
+                                results['found'] = True
+                        sha256 = data.get('sha256', '')
+                        if not results['found'] and sha256:
+                            hash_result = await asyncio.to_thread(find_by_hash, sha256, filename)
+                            if hash_result:
+                                key = 'civitai' if hash_result.get('source') == 'civitai' else 'huggingface'
+                                results[key] = {**hash_result, 'download_url': hash_result['url']}
+                                results['found'] = True
+
+                        # 4. Search HuggingFace for exact file match
+                        if not results['found']:
+                            hf_result = search_huggingface_for_file(filename, token=get_token('huggingface'))
                             if hf_result:
                                 results['huggingface'] = hf_result
                                 results['found'] = True
                         
-                        # 4. Search CivitAI for exact file match
+                        # 5. Search CivitAI for exact file match
                         if not results['found']:
-                            civitai_result = search_civitai_for_file(filename)
+                            civitai_result = search_civitai_for_file(filename, api_key=get_token('civitai'))
                             if civitai_result:
                                 results['civitai'] = civitai_result
                                 results['found'] = True
@@ -361,26 +415,25 @@ class ModelLinkerExtension:
                                 status=400
                             )
                         
-                        # Build headers if needed
-                        headers = {}
-                        if 'huggingface.co' in url:
-                            hf_token = data.get('hf_token', '')
-                            if hf_token:
-                                headers['Authorization'] = f'Bearer {hf_token}'
-                        elif 'civitai.com' in url:
-                            civitai_key = data.get('civitai_key', '')
-                            if civitai_key and 'token=' not in url:
-                                url += f"{'&' if '?' in url else '?'}token={civitai_key}"
+                        # Tokens come from the server-side settings, never
+                        # from the browser; sent as a header (not in the URL)
+                        # so they don't end up in logs. requests drops the
+                        # header when CivitAI redirects to its file storage.
+                        headers = auth_headers_for_url(url)
                         
                         # Start background download
-                        download_id = start_background_download(
-                            url=url,
-                            filename=filename,
-                            category=category,
-                            headers=headers if headers else None,
-                            subfolder=subfolder
-                        )
-                        
+                        try:
+                            download_id = start_background_download(
+                                url=url,
+                                filename=filename,
+                                category=category,
+                                headers=headers if headers else None,
+                                subfolder=subfolder
+                            )
+                        except ValueError as e:
+                            # filename/subfolder/category tried to leave the model folder
+                            return web.json_response({'error': str(e), 'success': False}, status=400)
+
                         return web.json_response({
                             'success': True,
                             'download_id': download_id,
